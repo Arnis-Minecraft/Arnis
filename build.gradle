@@ -1,0 +1,118 @@
+plugins {
+	id 'base'
+}
+
+group = project.maven_group
+version = project.mod_version
+
+// Version projects are thin compatibility overlays. Keep source implementations in
+// the narrowest shared layer that supports them instead of copying them per target.
+ext.tellusSharedSourceDirs = { Collection<String> layers, String sourcePath ->
+	[rootProject.file("src/${sourcePath}")] + layers.collect { layer ->
+		rootProject.file("shared/${layer}/src/${sourcePath}")
+	}
+}
+
+subprojects {
+	group = rootProject.group
+	version = rootProject.version
+
+	// IDEs cannot evaluate the closure excludes that let one source layer override another,
+	// so every file Gradle skips becomes an explicit exclude on its Eclipse source folder.
+	pluginManager.withPlugin('eclipse') {
+		// Buildship applies eclipse before this script runs, and the classpath merger is replaced once Java is applied.
+		plugins.withType(JavaBasePlugin) {
+			eclipse.classpath.file.whenMerged { classpath ->
+				def compiled = sourceSets.collectMany { [it.java, it.resources] }.collectMany { it.files } as Set
+				classpath.entries.findAll { it instanceof org.gradle.plugins.ide.eclipse.model.SourceFolder && it.dir?.isDirectory() }.each { folder ->
+					def skipped = fileTree(folder.dir).files.findAll { !compiled.contains(it) }
+					folder.excludes = (folder.excludes + skipped.collect { folder.dir.toPath().relativize(it.toPath()).toString().replace('\\', '/') }).unique()
+				}
+			}
+		}
+	}
+}
+
+def tellusTargets = [
+	[project: 'mc1201', suffix: '1201', label: 'Minecraft 1.20.1 Fabric', loader: 'fabric'],
+	[project: 'mc1201-forge', suffix: '1201Forge', label: 'Minecraft 1.20.1 Forge', loader: 'forge'],
+	[project: 'mc1211', suffix: '1211', label: 'Minecraft 1.21.1 Fabric', loader: 'fabric'],
+	[project: 'mc1211-neoforge', suffix: '1211NeoForge', label: 'Minecraft 1.21.1 NeoForge', loader: 'neoforge'],
+	[project: 'mc12111', suffix: '12111', label: 'Minecraft 1.21.11 Fabric', loader: 'fabric'],
+	[project: 'mc12111-neoforge', suffix: '12111NeoForge', label: 'Minecraft 1.21.11 NeoForge', loader: 'neoforge'],
+	[project: 'mc262', suffix: '262', label: 'Minecraft 26.2 Fabric', loader: 'fabric'],
+	[project: 'mc262-neoforge', suffix: '262NeoForge', label: 'Minecraft 26.2 NeoForge', loader: 'neoforge'],
+	[project: 'mc263', suffix: '263', label: 'Minecraft 26.3 Fabric', loader: 'fabric'],
+	[project: 'mc263-neoforge', suffix: '263NeoForge', label: 'Minecraft 26.3 NeoForge', loader: 'neoforge'],
+].findAll { target -> findProject(":${target.project}") != null }
+
+['clean', 'assemble', 'check', 'build'].each { lifecycleTask ->
+	tasks.named(lifecycleTask) {
+		dependsOn(tellusTargets.collect { target -> ":${target.project}:${lifecycleTask}" })
+	}
+}
+
+tellusTargets.each { target ->
+	tasks.register("build${target.suffix}") {
+		group = 'build'
+		description = "Builds the ${target.label} target."
+		dependsOn(":${target.project}:build")
+	}
+
+	['Client', 'Server'].each { side ->
+		tasks.register("run${side}${target.suffix}") {
+			group = target.loader
+			description = "Runs the ${target.label} ${side.toLowerCase()} target."
+			dependsOn(":${target.project}:run${side}")
+		}
+	}
+}
+
+def duplicationCheckRoots = [rootProject.file('src'), rootProject.file('shared')] + tellusTargets.collect { target ->
+	rootProject.file("${target.project}/src")
+}
+
+tasks.register('checkVersionSourceDuplication') {
+	group = 'verification'
+	description = 'Fails when identical Java implementations are copied into more than one source layer.'
+	inputs.files(duplicationCheckRoots.collect { sourceRoot -> fileTree(sourceRoot) { include '**/*.java' } })
+
+	doLast {
+		def copiesByImplementation = [:].withDefault { [] }
+		duplicationCheckRoots.each { sourceRoot ->
+			fileTree(sourceRoot) { include '**/*.java' }.files.each { sourceFile ->
+				def normalizedPath = sourceFile.absolutePath.replace('\\', '/')
+				def matcher = normalizedPath =~ /.*\/src\/(main|client|test)\/java\/(.+)$/
+				if (matcher.matches()) {
+					def relativePath = "src/${matcher.group(1)}/java/${matcher.group(2)}"
+					def implementation = sourceFile.readLines('UTF-8')
+						.findAll { line ->
+							def trimmed = line.trim()
+							return !trimmed.isEmpty() && ![
+								'import net.fabricmc.api.EnvType;',
+								'import net.fabricmc.api.Environment;',
+								'@Environment(EnvType.CLIENT)',
+							].contains(trimmed)
+						}
+						.collect { line -> line.replaceFirst(/[ \\t]+$/, '') }
+						.join('\n')
+					def digest = java.security.MessageDigest.getInstance('SHA-256')
+						.digest(implementation.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+						.encodeHex()
+						.toString()
+					copiesByImplementation["${relativePath}:${digest}"] << sourceFile
+				}
+			}
+		}
+
+		def duplicates = copiesByImplementation.values().findAll { copies -> copies.size() > 1 }
+		if (!duplicates.isEmpty()) {
+			def details = duplicates.collect { copies -> copies.collect { file -> rootProject.relativePath(file) }.join('\n  ') }.join('\n\n  ')
+			throw new GradleException("Identical version source files must be moved to a shared layer:\n  ${details}")
+		}
+	}
+}
+
+tasks.named('check') {
+	dependsOn(tasks.named('checkVersionSourceDuplication'))
+}

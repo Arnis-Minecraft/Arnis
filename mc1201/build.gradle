@@ -1,0 +1,26 @@
+plugins {
+	id 'net.fabricmc.fabric-loom-remap' version '1.14.10'
+	id 'eclipse'
+	id 'maven-publish'
+}
+
+ext.tellus = [
+	minecraftVersion: '1.20.1',
+	loaderVersion: '0.16.10',
+	fabricVersion: '0.92.8+1.20.1',
+	fabricDependencyConfiguration: 'modImplementation',
+	javaVersion: 17,
+	distantHorizonsRuntimeProperty: 'mc1201_distant_horizons_runtime_path',
+	sharedSourceLayers: ['pre-26', 'mc1201', 'fabric', 'pre-26-fabric'],
+	mapboxVersion: '23.2.0',
+	protobufVersion: '3.25.5',
+	officialMappings: true,
+	testDistantHorizonsRuntime: false,
+	overriddenSharedMainSources: [
+		'com/yucareux/tellus/network/GeoTpOpenMapPayload.java',
+		'com/yucareux/tellus/network/GeoTpTeleportPayload.java',
+		'com/yucareux/tellus/worldgen/EarthBiomeSource.java',
+	]
+]
+
+apply from: rootProject.file('gradle/tellus-fabric.gradle')
